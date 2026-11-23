@@ -1,4 +1,6 @@
-import math, subprocess, sys
+import math, subprocess, sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from music import make_track
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 W, H, FPS, SECS = 1080, 1920, 30, 20
@@ -34,7 +36,7 @@ RAW = [
  ("shopping","MEDIUM","Sharon shopped for cheap shoes and short shirts, but the shop's cheerful cashier charged Sharon for six shirts she should not have chosen."),
  ("airport","SUPER HARD","The swift Swiss pilot slowly slid six sleek silver suitcases past the strict security staff, who suspiciously searched each stylish suitcase."),
 ]
-VIDEOS = [dict(name=f"{i+1:02d}_{n}_{l.lower().replace(' ','')}", level="LEVEL: "+l, lv=l, color=LV[l][0], secs=LV[l][1], bg=BGS[i%5], text=t) for i,(n,l,t) in enumerate(RAW)]
+VIDEOS = [dict(name=f"{i+1:02d}_{n}_{l.lower().replace(' ','')}", level="LEVEL: "+l, lv=l, day=i+1, color=LV[l][0], secs=LV[l][1], bg=BGS[i%5], text=t) for i,(n,l,t) in enumerate(RAW)]
 # optional args: only render videos whose number matches, e.g. `python3 make_videos.py 21 22`
 if sys.argv[1:]:
     VIDEOS = [v for v in VIDEOS if v["name"].split("_")[0] in sys.argv[1:]]
@@ -55,7 +57,7 @@ def text_layer(v):
     d = ImageDraw.Draw(img)
     maxw = W - LEFT - RIGHT
     y = 300
-    d.text((LEFT, 215), "@masterdictionpro", font=font("Medium", 40), fill=(255, 255, 255, 170))
+    d.text((LEFT, 215), f"@masterdictionpro  ·  Day {v['day']}", font=font("Medium", 40), fill=(255, 255, 255, 170))
     for line, f, fill in [("TEST YOUR DICTION", font("Bold", 84), (255, 214, 0)),
                           ("Read it without tripping?", font("Medium", 52), (255, 255, 255))]:
         d.text((LEFT, y), line, font=f, fill=fill); y += f.size + 22
@@ -88,6 +90,12 @@ def hook_layer(v):
     hf = font("Bold", size)
     lh = 136
     y = H // 2 - (len(lines) * lh) // 2 - 80
+    # series label above the hook, e.g. "DAY 4"
+    df = font("Bold", 60)
+    day = f"DAY {v['day']}"
+    tw = d.textlength(day, font=df)
+    d.rounded_rectangle(((W - tw) // 2 - 34, y - 150, (W + tw) // 2 + 34, y - 60), 45, outline=(255, 255, 255), width=5)
+    d.text(((W - tw) // 2, y - 145), day, font=df, fill=(255, 255, 255))
     for k, line in enumerate(lines):
         tw = d.textlength(line, font=hf)
         d.text(((W - tw) // 2, y), line, font=hf, fill=(255, 214, 0) if k == 0 else (255, 255, 255))
@@ -98,6 +106,10 @@ def hook_layer(v):
     x0 = (W - tw - 56) // 2
     d.rounded_rectangle((x0, y, x0 + tw + 56, y + 80), 40, fill=v["color"])
     d.text((x0 + 28, y + 10), v["level"], font=lf, fill=(15, 15, 15))
+    ff = font("Medium", 46)
+    for k, line in enumerate(["A new tongue twister every day.", "Follow so you don't miss one!"]):
+        tw = d.textlength(line, font=ff)
+        d.text(((W - tw) // 2, y + 170 + k * 64), line, font=ff, fill=(220, 220, 230))
     sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     sh.putalpha(img.getchannel("A").filter(ImageFilter.GaussianBlur(8)).point(lambda a: int(a * 0.6)))
     out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -123,9 +135,10 @@ for v in VIDEOS:
     nh = int(FPS * HOOK)
     total = v["secs"] + HOOK
     out = f"/home/claude/out/{v['name']}.mp4"
+    song = make_track(total, v["day"] % 4, f"/home/claude/out/{v['name']}.wav")  # original background music
     p = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                           "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-                          "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                          "-i", song,
                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                           "-c:a", "aac", "-shortest", "-movflags", "+faststart", out], stdin=subprocess.PIPE)
     for i in range(int(FPS * total)):
