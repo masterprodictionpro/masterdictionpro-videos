@@ -2,6 +2,11 @@ import math, subprocess, sys
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 W, H, FPS, SECS = 1080, 1920, 30, 20
+HOOK = 1.5  # seconds of big "hook" text at the start, to stop people swiping away
+HOOKS = {"EASY": ["Think this is easy?", "Say it 3 times fast."],
+         "MEDIUM": ["Can you say this", "without tripping?"],
+         "HARD": ["Bet you can't say", "this one fast."],
+         "SUPER HARD": ["Only for pros.", "Try it out loud!"]}
 F = "/usr/share/fonts/truetype/google-fonts/Poppins-"
 font = lambda w, s: ImageFont.truetype(F + w + ".ttf", s)
 
@@ -29,7 +34,10 @@ RAW = [
  ("shopping","MEDIUM","Sharon shopped for cheap shoes and short shirts, but the shop's cheerful cashier charged Sharon for six shirts she should not have chosen."),
  ("airport","SUPER HARD","The swift Swiss pilot slowly slid six sleek silver suitcases past the strict security staff, who suspiciously searched each stylish suitcase."),
 ]
-VIDEOS = [dict(name=f"{i+1:02d}_{n}_{l.lower().replace(' ','')}", level="LEVEL: "+l, color=LV[l][0], secs=LV[l][1], bg=BGS[i%5], text=t) for i,(n,l,t) in enumerate(RAW)]
+VIDEOS = [dict(name=f"{i+1:02d}_{n}_{l.lower().replace(' ','')}", level="LEVEL: "+l, lv=l, color=LV[l][0], secs=LV[l][1], bg=BGS[i%5], text=t) for i,(n,l,t) in enumerate(RAW)]
+# optional args: only render videos whose number matches, e.g. `python3 make_videos.py 21 22`
+if sys.argv[1:]:
+    VIDEOS = [v for v in VIDEOS if v["name"].split("_")[0] in sys.argv[1:]]
 
 LEFT, RIGHT = 90, 150  # right margin larger: TikTok/Reels buttons sit there
 
@@ -69,6 +77,33 @@ def text_layer(v):
     out.alpha_composite(sh, (4, 6)); out.alpha_composite(img)
     return out, y + 70
 
+def hook_layer(v):
+    # big centered hook text + level pill, shown for the first HOOK seconds
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    lines = HOOKS[v["lv"]]
+    size = 104
+    while max(d.textlength(l, font=font("Bold", size)) for l in lines) > W - 160:
+        size -= 2  # shrink so the hook keeps a safe side margin
+    hf = font("Bold", size)
+    lh = 136
+    y = H // 2 - (len(lines) * lh) // 2 - 80
+    for k, line in enumerate(lines):
+        tw = d.textlength(line, font=hf)
+        d.text(((W - tw) // 2, y), line, font=hf, fill=(255, 214, 0) if k == 0 else (255, 255, 255))
+        y += lh
+    y += 50
+    lf = font("Bold", 48)
+    tw = d.textlength(v["level"], font=lf)
+    x0 = (W - tw - 56) // 2
+    d.rounded_rectangle((x0, y, x0 + tw + 56, y + 80), 40, fill=v["color"])
+    d.text((x0 + 28, y + 10), v["level"], font=lf, fill=(15, 15, 15))
+    sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sh.putalpha(img.getchannel("A").filter(ImageFilter.GaussianBlur(8)).point(lambda a: int(a * 0.6)))
+    out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    out.alpha_composite(sh, (4, 6)); out.alpha_composite(img)
+    return out
+
 def bg_frame(c1, c2, t, SECS):
     # slow drifting diagonal gradient
     small = Image.new("RGB", (54, 96))
@@ -80,26 +115,41 @@ def bg_frame(c1, c2, t, SECS):
             px[xx, yy] = tuple(int(c1[i] * (1 - k) + c2[i] * k) for i in range(3))
     return small.resize((W, H), Image.BILINEAR)
 
+import os
+os.makedirs("/home/claude/out/previews", exist_ok=True)
 for v in VIDEOS:
     layer, bar_y = text_layer(v)
+    hook = hook_layer(v)
+    nh = int(FPS * HOOK)
+    total = v["secs"] + HOOK
     out = f"/home/claude/out/{v['name']}.mp4"
     p = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                           "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
                           "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                           "-c:a", "aac", "-shortest", "-movflags", "+faststart", out], stdin=subprocess.PIPE)
-    for i in range(FPS * v["secs"]):
+    for i in range(int(FPS * total)):
         t = i / FPS
-        fr = bg_frame(*v["bg"], t, v["secs"]).convert("RGBA")
-        fr.alpha_composite(layer)
-        d = ImageDraw.Draw(fr)
-        # countdown bar
-        d.rounded_rectangle((LEFT, bar_y, W - RIGHT, bar_y + 18), 9, fill=(255, 255, 255, 60))
-        rem = 1 - t / v["secs"]
-        if rem > 0.01:
-            d.rounded_rectangle((LEFT, bar_y, LEFT + int((W - RIGHT - LEFT) * rem), bar_y + 18), 9, fill=v["color"])
+        fr = bg_frame(*v["bg"], t, total).convert("RGBA")
+        if i < nh:
+            # hook: quick zoom-in over the first 0.25s, then hold
+            s = 0.88 + 0.12 * min(1, t / 0.25)
+            hl = hook.resize((int(W * s), int(H * s)), Image.BILINEAR) if s < 1 else hook
+            fr.alpha_composite(hl, ((W - hl.width) // 2, (H - hl.height) // 2))
+        else:
+            tt = t - HOOK
+            a = min(1, tt / 0.2)  # fast fade-in of the tongue twister
+            fr.alpha_composite(layer if a >= 1 else Image.blend(Image.new("RGBA", (W, H), (0, 0, 0, 0)), layer, a))
+            d = ImageDraw.Draw(fr)
+            # countdown bar
+            d.rounded_rectangle((LEFT, bar_y, W - RIGHT, bar_y + 18), 9, fill=(255, 255, 255, 60))
+            rem = 1 - tt / v["secs"]
+            if rem > 0.01:
+                d.rounded_rectangle((LEFT, bar_y, LEFT + int((W - RIGHT - LEFT) * rem), bar_y + 18), 9, fill=v["color"])
         p.stdin.write(fr.convert("RGB").tobytes())
-        if i == FPS * 3:
-            fr.convert("RGB").save(f"/home/claude/out/previews/{v["name"]}.png")
+        if i == nh // 2:
+            fr.convert("RGB").save(f"/home/claude/out/previews/{v['name']}_hook.png")
+        if i == nh + FPS * 2:
+            fr.convert("RGB").save(f"/home/claude/out/previews/{v['name']}.png")
     p.stdin.close(); p.wait()
     print("done", out)
